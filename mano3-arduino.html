@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ml5+arduino</title>
+</head>
+<body>
+
+  <style>
+    .main{
+      width: 90%;
+      display: block;
+      margin: 0 auto;
+      text-align: center;
+    }
+  </style>
+
+  <div class="main" id="contenedor">
+    <button id="connectBtn" type="button">conectar arduino</button>
+    <p id="mensaje"></p>
+    <!-- canvas -->
+  </div>  
+
+  <!--
+  dependiendo de la postura de la mano (abierta o cerrada) encendemos o apagamos
+  un led en el arduino. para la comunicación utilizaremos un webSocket
+  consulte la carpeta "arduino" de este proyecto para el sketch que va en la tarjeta
+
+  PROCEDIMIENTOS
+  1. arduino debe tener el programa que lee el serialmonitor ya cargado
+  2. abrir cmd -> node-red y agregar los nodos: "websocket in", "debug" y "serial out" INSTANCIAR
+  3. iniciar la aplicación web ML5 y presionar el botón conectar arduino
+  -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.11.2/p5.min.js"></script>
+  <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script>
+
+  <script>
+    //objetos
+    let handPose
+    let video
+    let hands = []
+
+    let socket = null
+    let lastSentCommand = null
+
+    //constantes
+    const WS_URL = "ws:localhost:1880/ws/hand"
+
+    //forman parte de un algoritmo que reconoce mano abierta o cerrada
+    const WRIST_INDEX = 0
+    const INDEX_MCP_INDEX = 5
+    const FINGERTIP_INDICES = [8, 12, 16, 20]
+
+    //se requiere cargar el modelo de reconocimiento manos
+    function preload(){
+      handPose = ml5.handPose({flipped: true})
+
+    }
+
+    //configuración entorno
+    function setup(){
+      const canvas = createCanvas(640, 480) //aquí se pintará el vídeo
+      canvas.parent("contenedor") //en lienzo se renderiza en...
+
+      video = createCapture(VIDEO, { flipped: true })
+      video.size(640, 480)
+      video.hide()
+
+      handPose.detectStart(video, gotHands)
+
+      //programar el envío de datos al socket...
+      const connectBtn = document.getElementById("connectBtn")
+      connectBtn.addEventListener("click", toggleSocket)
+    }
+
+    function gotHands(results){
+      hands = results
+    }
+
+    function isHandOpen(hand){
+      const keypoints = hand.keypoints
+
+      if(!keypoints || keypoints.length <21) return null
+
+      const wrist = keypoints[WRIST_INDEX]
+      const indexBase = keypoints[INDEX_MCP_INDEX]
+
+      //función dist() calcula la distancia entre 2 pares de coordenadas
+      const palmScale = dist(wrist.x, wrist.y, indexBase.x, indexBase.y)
+      if (palmScale < 15) return null
+
+      let extendedCount = 0
+      for (const tipIndex of FINGERTIP_INDICES){
+        const tip = keypoints[tipIndex]
+        const dWrist = dist(tip.x, tip.y, wrist.x, wrist.y)
+
+
+        if(dWrist > palmScale * 1.45){
+          extendedCount++
+        }
+      }
+
+      return extendedCount >= 3 //si se cumple, devuelve true
+    }
+
+    //esta función activa o desactiva la comunicación por websocket
+    function toggleSocket(){
+      //si tenemos un socket activo, lo cerramos
+      if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)){
+        socket.close()
+        return
+      }
+
+      //el socket no está listo, lo vamos a aperturar
+      lastSentCommand = null
+      updateStatus("conectando a websocket...")
+
+      //creamos un nuevo objeto de tipo websocket (api js)
+      socket = new WebSocket(WS_URL)
+
+      //administrar eventos
+      socket.addEventListener("open", () => {
+        updateStatus("websocket creado y conectado correctamente")
+      })
+
+      //el socket se cierra con la misma función que se abre
+      socket.addEventListener("close", () => {
+        socket = null
+        lastSentCommand = null
+        updateStatus("websocket desconectado")
+      })
+
+      socket.addEventListener("error", () => {
+        updateStatus("error de websocket. verifique el servicio")
+      })
+    }
+
+    //enviará los datos utilizando el canal websocket
+    function sendCommand(cmd){
+      //debemos considerar un socket activo antes del envío
+      //si tratamos de enviar el mismo valor, la función se corta
+      if (!socket || socket.readyState !== WebSocket.OPEN || cmd === lastSentCommand){
+        return
+      }
+
+      socket.send(cmd)
+      lastSentCommand = cmd
+    }
+
+    //comunicación
+    function updateStatus(texto){
+      document.querySelector("#mensaje").textContent = texto
+    }
+
+    //renderiza la imagen en el lienzo
+    function draw(){
+      image(video, 0, 0, width, height)
+
+      //se detectó una mano
+      if (hands.length > 0){
+        const hand = hands[0]
+        const open = isHandOpen(hand)
+
+        fill(0, 255, 140)
+        noStroke()
+
+        for(const pt of hand.keypoints){
+          circle(pt.x, pt.y, 8)
+        }
+
+        if (open !== null){
+          //operador ternario para definir el mensaje
+          const label = open 
+            ? "MANO ABIERTA" 
+            : "MANO CERRADA"
+
+          fill(255) //color
+          textSize(20) //tamaño
+          text(label, 16, 32) //renderizar texto canvas
+
+          //debemos enviar por websocket un '1' abierta, '0' cerrada
+          const command = open ? "1" : "0"
+          sendCommand(command)
+        }
+
+      } //se detectó una mano
+    } //fin draw()
+
+  </script>
+</body>
+</html>
